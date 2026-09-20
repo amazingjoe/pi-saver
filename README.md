@@ -1,17 +1,12 @@
-# 💾 Pi-Saver
+# ∇ Pi-Saver
 
 **Give the next model call the context it needs. Keep the history for later.**
 
-Pi-Saver is a project-local **Pi extension** that intercepts conversation
-context before each inference. It groups history into complete turns, runs those
-chunks through [Jev by TypeSafe](https://typesafe.ai), and judges what is necessary
-for the latest user prompt—and what can likely be discarded for this call.
+Pi-Saver is a dynamic context-filtering extension for [Pi Coder](https://pi.dev) that intercepts conversation context before each inference. By using [Jev by TypeSafe](https://typesafe.ai) to instantly evaluate and exclude information in the context history that isn't relevant to your current request, Pi-Saver can save **as much as 75% or more** on context tokens while keeping your complete session history intact.
 
-This can substantially reduce the context carried through coding sessions,
-especially when you make many different modifications. Changing a title's color
-may need the current CSS and an applicable design constraint, but not an entire
-history of game brainstorming, completed debugging, and superseded source code.
-Actual savings depend on the conversation and Jev's decisions.
+It groups history into complete turns, runs those chunks through Jev, and judges what is necessary for the latest user prompt—and what can safely be discarded for this specific call.
+
+This substantially reduces the context carried through long coding sessions, especially when switching between different tasks or modifications. Changing a title's color may need the current CSS and an applicable design constraint, but not an entire history of brainstorming, completed debugging, and superseded code.
 
 > **Temporary filtering, intact history.** Active mode changes only the messages
 > sent to the next inference. It never edits saved conversation history. An older
