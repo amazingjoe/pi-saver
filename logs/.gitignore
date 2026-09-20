@@ -1,0 +1,3 @@
+# Context logs may contain source code, prompts, tool output, or secrets.
+*.json
+!.gitignore
