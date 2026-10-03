@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { DEFAULT_REMOVAL_THRESHOLD, isValidThreshold } from "./config.ts";
 
@@ -59,6 +60,59 @@ export function groupContext(messages: AgentMessage[]): ContextGroup[] {
   return groups;
 }
 
+/**
+ * Fingerprint the evidence that can affect a turn-level relevance review.
+ * Historical context and the current user message are included; assistant/tool
+ * activity appended to the current turn is deliberately ignored so one review
+ * can be reused throughout that agent loop.
+ */
+export function reviewScopeFingerprint(messages: AgentMessage[]): string {
+  const groups = groupContext(messages);
+  const latestTurnIndex = groups.findLastIndex((group) => group.kind === "turn");
+  const scope = groups.map((group, index) => ({
+    id: group.id,
+    kind: group.kind,
+    protected: group.protected,
+    messages: index === latestTurnIndex ? group.messages.slice(0, 1) : group.messages,
+  }));
+  return createHash("sha256").update(JSON.stringify(scope)).digest("hex");
+}
+
+export class TurnReviewMemo<T> {
+  private snapshot?: {
+    configSignature: string;
+    scopeFingerprint: string;
+    originCall: number;
+    value: T;
+  };
+
+  reset(): void {
+    this.snapshot = undefined;
+  }
+
+  reuse(messages: AgentMessage[], configSignature: string): { value: T; originCall: number } | undefined {
+    const snapshot = this.snapshot;
+    if (!snapshot) return undefined;
+    if (
+      snapshot.configSignature !== configSignature ||
+      snapshot.scopeFingerprint !== reviewScopeFingerprint(messages)
+    ) {
+      this.reset();
+      return undefined;
+    }
+    return { value: snapshot.value, originCall: snapshot.originCall };
+  }
+
+  remember(messages: AgentMessage[], configSignature: string, originCall: number, value: T): void {
+    this.snapshot = {
+      configSignature,
+      scopeFingerprint: reviewScopeFingerprint(messages),
+      originCall,
+      value,
+    };
+  }
+}
+
 // Review text is a projection only. Original messages are never reconstructed from it.
 function contentText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -111,23 +165,25 @@ async function evaluateGroups(
   { apiKey, fetchImpl = fetch, timeoutMs = 5000, threshold = DEFAULT_REMOVAL_THRESHOLD }: { apiKey?: string; fetchImpl?: typeof fetch; timeoutMs?: number; threshold?: number } = {},
 ) {
   // Enclose cloning, projection, HTTP and validation in the same fail-open boundary.
+  let jevApiCallCount = 0;
   try {
     if (!isValidThreshold(threshold)) throw new Error("invalid-config");
     const request = buildReviewRequest(groups);
-    const base = { mode: "observe", policyVersion: "latest-request-v3-batched", threshold, request, proposedRemovedGroupIds: [] as string[] };
+    const base = { mode: "observe", policyVersion: "latest-request-v3-batched", threshold, request, jevApiCallCount, proposedRemovedGroupIds: [] as string[] };
     if (!Object.keys(request.questions).length) return { ...base, status: "skipped", reason: "no-eligible-turns" };
     if (!apiKey) return { ...base, status: "skipped", reason: "missing-api-key" };
     // Jev enforces token limits: 64k total, 32k state + longest question.
     // Character counts cannot accurately enforce these limits. Send intact evidence
     // and fail open on API rejection rather than truncate or skip by character count.
     // https://docs.typesafe.ai/models
+    jevApiCallCount = 1;
     const response = await fetchImpl("https://api.typesafe.ai/v1/systemone", {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify(request),
       signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!response.ok) return { ...base, status: "error", reason: `http-${response.status}` };
+    if (!response.ok) return { ...base, jevApiCallCount, status: "error", reason: `http-${response.status}` };
     const result = await response.json();
     const decisions = groups.map((group) => {
       if (group.protected) return { id: group.id, decision: "keep", reason: "protected" };
@@ -137,11 +193,11 @@ async function evaluateGroups(
       }
       return { id: group.id, relevanceProbability: answer.noul, decision: answer.noul < threshold ? "would-remove" : "keep" };
     });
-    return { ...base, status: "reviewed", decisions, model: result.model, usage: result.usage,
+    return { ...base, jevApiCallCount, status: "reviewed", decisions, model: result.model, usage: result.usage,
       proposedRemovedGroupIds: decisions.filter((d) => d.decision === "would-remove").map((d) => d.id) };
   } catch (error) {
     // Do not log server bodies, credentials, or arbitrary exception messages.
-    return { mode: "observe", status: "error", reason: error instanceof Error && error.message === "invalid-response" ? "invalid-response" : "review-failed", proposedRemovedGroupIds: [] };
+    return { mode: "observe", status: "error", reason: error instanceof Error && error.message === "invalid-response" ? "invalid-response" : "review-failed", jevApiCallCount, proposedRemovedGroupIds: [] };
   }
 }
 
@@ -204,11 +260,13 @@ export async function observeContext(messages: AgentMessage[], options: ReviewOp
       mode: "observe", policyVersion: "latest-request-v3-batched", threshold: options.threshold ?? DEFAULT_REMOVAL_THRESHOLD,
       status: completed.some(batch => batch.review.status === "reviewed") ? "reviewed" : "error",
       ...(failed ? { reason: "partial-or-failed-batch-review" } : {}),
-      batches: completed, batchCount: completed.length, decisions,
+      batches: completed, batchCount: completed.length,
+      jevApiCallCount: completed.reduce((total, batch) => total + batch.review.jevApiCallCount, 0),
+      decisions,
       proposedRemovedGroupIds: decisions.filter(decision => decision.decision === "would-remove").map(decision => decision.id),
     };
   } catch {
-    return { mode: "observe", status: "error", reason: "review-failed", proposedRemovedGroupIds: [] };
+    return { mode: "observe", status: "error", reason: "review-failed", jevApiCallCount: 0, proposedRemovedGroupIds: [] };
   }
 }
 
