@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/pi-saver-banner.png" alt="Pi-Saver: Dynamic Context Pruning for Pi Coder powered by TypeSafe AI Jev" width="100%">
+</p>
+
 # ∇ Pi-Saver
 
 **Give the next model call the context it needs. Keep the history for later.**
